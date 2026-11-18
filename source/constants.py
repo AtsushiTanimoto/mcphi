@@ -22,6 +22,13 @@ NEUTRAL_ABSORPTION_DIRS = ["/Users/tanimoto/github/neutral_matter/database/absor
                            "/Users/tanimoto/software/database/neutral_matter/absorption/geant4_epdl97"]
 # H 原子との電荷交換の係数 (Kingdon & Ferland 1996 のフィット、Cloudy のデータファイルの写し) はこのリポジトリの database/charge_exchange に同梱
 CHARGE_EXCHANGE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "database", "charge_exchange")
+# Verner の光電離断面積のフィット (phfit2.f の係数、H〜Zn の全イオン) はこのリポジトリの database/verner に同梱
+VERNER_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "database", "verner")
+# 最外殻 (価電子) の光電離を FAC の代わりに Verner et al. (1996) のフィットで評価するイオン (記号は <元素><電子数 2 桁>)。
+# 基底配置だけの高速な FAC 計算 (ground_photoionization.py) は 3p 電子の閾値付近の断面積が悪い (S II は閾値で Verner の 0.2 倍、
+# 1.6 倍のエネルギーで 4.5 倍)。内殻は FAC のチャネル (Auger 分岐つき) のまま使う。
+# Si II ("Si13"、閾値で 0.63 倍) は差し替えても Cloudy・XSTAR との一致が良くならなかったので FAC のまま
+VERNER_VALENCE_IONS = ["S15"]
 # 周波数積分した制動放射の Gaunt 因子 (van Hoof et al. 2015、Z = 1〜30) はこのリポジトリの database/gaunt_ff に同梱
 GAUNT_FF_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "database", "gaunt_ff")
 

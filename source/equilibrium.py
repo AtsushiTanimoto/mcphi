@@ -144,15 +144,11 @@ class PhotoionizationModel:
 
         # 光電離断面積 σ [cm^2] と加熱断面積 Σ σ_k (E - I_k) [erg cm^2] の行列 (N_ions, N_nu)
         self.sigma_matrix = numpy.array([ion.photoionization_cross_section(self.E_eV) for ion in self.ions])
-        self.heating_matrix = numpy.array([ion.photoionization_heating_cross_section(self.E_eV) for ion in self.ions])
+        self.heating_matrix = numpy.array([ion.photoionization_heating_cross_section(self.E_eV, auger=self.auger) for ion in self.ions])
         # Auger 電離を伴う (2 段上に電離する) 分の断面積 [cm^2] (auger=False なら 0、加熱も光電子の分だけにする)
         self.auger_matrix = numpy.array([ion.auger_cross_section(self.E_eV) for ion in self.ions])
         if not self.auger:
             self.auger_matrix[:] = 0.0
-            for k, ion in enumerate(self.ions):
-                if ion.channels is not None:
-                    no_auger = [(I, S0, G, t, 0.0, 0.0) for I, S0, G, t, P_A, E_A in ion.channels]
-                    self.heating_matrix[k] = atomic_data.photoionization_heating_cross_section(self.E_eV, no_auger)
 
         # Compton 散乱: 1 回の散乱で電子が得る平均エネルギー E^2/(m_e c^2) (1 - 21E/(5 m_e c^2)) と失うエネルギー 4kT E/(m_e c^2)
         x = self.E_eV / m_e_c2_eV

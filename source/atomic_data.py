@@ -3,6 +3,7 @@
 
   - 光電離断面積: FAC 原子データベース (<ATOMIC_DATA_DIR>/<元素>/<元素><電子数>.pi)。
     MONACO と同じ式 σ(E) = Σ_k Σ0_k (E/I_k)^Γ_k exp(-E/τ_k) で評価する。
+    constants.VERNER_VALENCE_IONS のイオンは価電子の分だけ Verner のフィット (database/verner/) に置き換える。
     データベースには電子数 ≤ 10 (H, He, C, N, O, Ne は全段階) のイオンしかないため、
     それより低い電離段階は扱わない (ElementData.min_charge を参照)。
   - 電離ポテンシャル: CHIANTI の ip/chianti.ip (実験値)。FAC の閾値はこれに合わせてずらす。
@@ -271,7 +272,7 @@ def fac_ion_symbol(element, number_of_electrons):
     return f"{element}{number_of_electrons:02d}"
 
 
-def load_photoionization_channels(element, number_of_electrons, ionization_potential_eV):
+def load_photoionization_channels(element, number_of_electrons, ionization_potential_eV, exclude_orbitals=()):
     """
     FAC 原子データベース (<ATOMIC_DATA_DIR>/<元素>/<元素><電子数>.pi) から
     基底準位の光電離断面積のフィットパラメータを読み込む。
@@ -283,6 +284,8 @@ def load_photoionization_channels(element, number_of_electrons, ionization_poten
     （チャネル間の閾値の差は FAC の値を保つ）。
     各チャネルについて、電離後の準位が自動電離するときの Auger 電離の確率 P_A と Auger 電子の平均エネルギー E_A [eV] を
     auger_branching() で求める (データがなければ 0)。
+    exclude_orbitals に軌道 (n*1000+l) を与えると、その軌道の電子が抜けるチャネルを除く (別のデータで置き換えるとき。
+    閾値のずらし方は除く前の全チャネルで決める)。
     戻り値: [(I [eV], Σ0 [cm^2], Γ, τ [eV], P_A, E_A [eV]), ...] (電離ポテンシャルの昇順)。ファイルがなければ None。
     """
     filepath = os.path.join(constants.ATOMIC_DATA_DIR, element, f"{fac_ion_symbol(element, number_of_electrons)}.pi")
@@ -293,14 +296,16 @@ def load_photoionization_channels(element, number_of_electrons, ionization_poten
         for line in f:
             columns = line.split()
             if columns and int(columns[0]) == 0:  # 基底準位からの光電離
-                raw.append((float(columns[5]), float(columns[6]), float(columns[7]), float(columns[8]), int(columns[3])))
+                raw.append((float(columns[5]), float(columns[6]), float(columns[7]), float(columns[8]), int(columns[3]), int(columns[4])))
     if not raw:
         raise ValueError(f"No photoionization data for the ground level in {filepath}")
     raw.sort()
     I_FAC_0 = raw[0][0]
     shift = ionization_potential_eV - I_FAC_0
     channels = []
-    for I, Sigma0, Gamma, tau, twoj in raw:
+    for I, Sigma0, Gamma, tau, twoj, orbital in raw:
+        if orbital in exclude_orbitals:
+            continue
         P_A, E_A = auger_branching(element, number_of_electrons - 1, I - I_FAC_0, twoj)
         channels.append((I + shift, Sigma0, Gamma, tau, P_A, E_A))
     return channels
@@ -444,6 +449,48 @@ def load_epdl97_table(Z, ionization_potential_eV):
     return E[keep], sigma[keep]
 
 
+# Verner のフィットの殻番号 1〜7 (1s, 2s, 2p, 3s, 3p, 3d, 4s) の軌道角運動量と FAC の軌道の番号 (n*1000+l)
+VERNER_SHELL_L = [0, 0, 1, 0, 1, 2, 0]
+VERNER_SHELL_ORBITALS = [1000, 2000, 2001, 3000, 3001, 3002, 4000]
+# 電子数 (1〜30) ごとの、内殻として扱う最も外側の殻の番号 (phfit2.f の NINN)。これより外の殻が価電子
+VERNER_INNER_SHELL = [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 3, 3, 3, 3, 3, 3, 3, 3, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5]
+
+
+def load_verner_valence_table(Z, number_of_electrons, ionization_potential_eV, N_E=3000, E_max_eV=1.0e6):
+    """
+    価電子 (最外殻) の光電離断面積の表を Verner のフィット (database/verner/、phfit2.f と同じ評価) から作る。
+      内殻の閾値 E_inn (内殻のうち最も外側の殻の閾値) 未満: Verner et al. (1996) の OP へのフィット (ph2.tsv、外側の殻の合計)
+        σ = σ0 [(x − 1)² + y_w²] y^(0.5P − 5.5) (1 + √(y/y_a))^(−P),  x = E/E0 − y0,  y = √(x² + y1²)
+      E_inn 以上: Verner & Yakovlev (1995) の殻ごとのフィット (ph1.tsv) の価電子の殻の和
+        σ = σ0 [(y − 1)² + y_w²] y^(0.5P − l − 5.5) (1 + √(y/y_a))^(−P),  y = E/E0
+    閾値が ionization_potential_eV に一致するよう全エネルギーを同じ量だけずらす。
+    戻り値: ((E [eV] の昇順配列, σ [cm^2] の配列), 価電子の殻の FAC の軌道の番号のリスト)。
+    1996 年のフィットがないイオン (OP にない元素) と電子数 < 3 は扱わない。
+    """
+    inner = VERNER_INNER_SHELL[number_of_electrons - 1]
+    ph1 = numpy.loadtxt(os.path.join(constants.VERNER_DIR, "ph1.tsv"), skiprows=1)
+    ph2 = numpy.loadtxt(os.path.join(constants.VERNER_DIR, "ph2.tsv"), skiprows=1)
+    shells = {int(row[2]): row[3:] for row in ph1[(ph1[:, 0] == Z) & (ph1[:, 1] == number_of_electrons)]}
+    outer = ph2[(ph2[:, 0] == Z) & (ph2[:, 1] == number_of_electrons)]
+    if inner == 0 or len(outer) == 0:
+        raise ValueError(f"No Verner et al. (1996) fit for Z = {Z} with {number_of_electrons} electrons")
+    valence = [shell for shell in shells if shell > inner]
+    threshold = min(shells[shell][0] for shell in valence)
+    E_inner = shells[inner][0]
+    E = numpy.sort(numpy.concatenate([numpy.geomspace(threshold, E_max_eV, N_E), [E_inner * (1.0 - 1.0e-9), E_inner]]))
+    E0, sigma0, y_a, P, y_w, y_0, y_1 = outer[0, 2:]
+    x = E / E0 - y_0
+    y = numpy.sqrt(x**2 + y_1**2)
+    sigma_outer = sigma0 * ((x - 1.0)**2 + y_w**2) * y**(0.5 * P - 5.5) * (1.0 + numpy.sqrt(y / y_a))**(-P)
+    sigma_shells = numpy.zeros_like(E)
+    for shell in valence:
+        E_th, E0, sigma0, y_a, P, y_w = shells[shell]
+        y = E / E0
+        sigma_shells += sigma0 * ((y - 1.0)**2 + y_w**2) * y**(0.5 * P - VERNER_SHELL_L[shell - 1] - 5.5) * (1.0 + numpy.sqrt(y / y_a))**(-P)
+    sigma = numpy.where(E < E_inner, sigma_outer, sigma_shells) * 1.0e-18
+    return (E + (ionization_potential_eV - threshold), sigma), [VERNER_SHELL_ORBITALS[shell - 1] for shell in valence]
+
+
 def tabulated_cross_section(E_eV, table, threshold_eV):
     """表 (E, σ) を log-log で内挿した断面積 [cm^2]。閾値未満と表の範囲外は 0"""
     E_table, sigma_table = table
@@ -461,7 +508,8 @@ class IonData:
     """
     元素 element の電荷 charge のイオンの原子データ。
       channels:   光電離断面積のチャネル (裸のイオンや FAC データがないイオンでは None)
-      table:      中性原子で FAC データがないときの EPDL97 の断面積の表 (E [eV], σ [cm^2])。それ以外は None
+      table:      断面積の表 (E [eV], σ [cm^2])。中性原子で FAC データがないときの EPDL97 の全断面積か、
+                  constants.VERNER_VALENCE_IONS のイオンの価電子の断面積 (Verner のフィット。channels は内殻だけになる)。それ以外は None
       ip_eV:      電離ポテンシャル [eV] (裸のイオンでは None)
       rr, dr:     このイオンから 1 階下への再結合 (中性では None)
       di_shells:  このイオンの衝突電離断面積 (裸のイオンでは空)
@@ -476,8 +524,12 @@ class IonData:
         self.chianti_name = f"{element.lower()}_{charge + 1}"
         if charge < self.Z:
             self.ip_eV = ionization_potential(self.Z, charge)
-            self.channels = load_photoionization_channels(element, self.number_of_electrons, self.ip_eV)
-            self.table = load_epdl97_table(self.Z, self.ip_eV) if (self.channels is None and charge == 0) else None
+            if self.symbol in constants.VERNER_VALENCE_IONS:
+                self.table, valence_orbitals = load_verner_valence_table(self.Z, self.number_of_electrons, self.ip_eV)
+                self.channels = load_photoionization_channels(element, self.number_of_electrons, self.ip_eV, valence_orbitals)
+            else:
+                self.channels = load_photoionization_channels(element, self.number_of_electrons, self.ip_eV)
+                self.table = load_epdl97_table(self.Z, self.ip_eV) if (self.channels is None and charge == 0) else None
             self.di_shells = load_chianti_direct_ionization(element, charge)
             self.ea_transitions = load_chianti_excitation_autoionization(element, charge)
         else:
@@ -496,12 +548,13 @@ class IonData:
         return self.channels is not None or self.table is not None
 
     def photoionization_cross_section(self, E_eV):
-        """光電離断面積 [cm^2]（FAC のチャネル、なければ EPDL97 の表、どちらもなければ 0）"""
+        """光電離断面積 [cm^2]（FAC のチャネルと表 (EPDL97 または Verner の価電子) の和、どちらもなければ 0）"""
+        sigma = numpy.zeros_like(numpy.asarray(E_eV, dtype=float))
         if self.channels is not None:
-            return photoionization_cross_section(E_eV, self.channels)
+            sigma += photoionization_cross_section(E_eV, self.channels)
         if self.table is not None:
-            return tabulated_cross_section(E_eV, self.table, self.ip_eV)
-        return numpy.zeros_like(numpy.asarray(E_eV, dtype=float))
+            sigma += tabulated_cross_section(E_eV, self.table, self.ip_eV)
+        return sigma
 
     def auger_cross_section(self, E_eV):
         """光電離のうち Auger 電離を伴って 2 段上に電離する分の断面積 [cm^2]（FAC のチャネルがなければ 0）"""
@@ -509,14 +562,19 @@ class IonData:
             return auger_cross_section(E_eV, self.channels)
         return numpy.zeros_like(numpy.asarray(E_eV, dtype=float))
 
-    def photoionization_heating_cross_section(self, E_eV):
-        """光電離加熱の断面積 [erg cm^2]（EPDL97 の表では全吸収を最外殻の電離とみなし σ(E) (E − I) とする）"""
+    def photoionization_heating_cross_section(self, E_eV, auger=True):
+        """
+        光電離加熱の断面積 [erg cm^2]（表の分は最外殻の電離とみなし σ(E) (E − I) とする）。
+        auger=False なら Auger 電子のエネルギーを含めず光電子の分だけにする
+        """
+        E = numpy.asarray(E_eV, dtype=float)
+        heating = numpy.zeros_like(E)
         if self.channels is not None:
-            return photoionization_heating_cross_section(E_eV, self.channels)
+            channels = self.channels if auger else [(I, Sigma0, Gamma, tau, 0.0, 0.0) for I, Sigma0, Gamma, tau, P_A, E_A in self.channels]
+            heating += photoionization_heating_cross_section(E, channels)
         if self.table is not None:
-            E = numpy.asarray(E_eV, dtype=float)
-            return tabulated_cross_section(E, self.table, self.ip_eV) * numpy.maximum(E - self.ip_eV, 0.0) * eV
-        return numpy.zeros_like(numpy.asarray(E_eV, dtype=float))
+            heating += tabulated_cross_section(E, self.table, self.ip_eV) * numpy.maximum(E - self.ip_eV, 0.0) * eV
+        return heating
 
     def alpha_RR(self, T_gas):
         """放射再結合係数 (このイオン → 1 階下) [cm^3 s^-1]"""
